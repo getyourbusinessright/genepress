@@ -172,7 +172,7 @@ Deno.serve(async (req: Request) => {
       raw_source_artifact_location: null,
       source_ingestion_date: new Date().toISOString(),
     })
-    .select()
+    .select("source_id")
     .single();
 
   if (insertError) {
@@ -208,7 +208,7 @@ Deno.serve(async (req: Request) => {
     {
       success: true,
       component_id,
-      source_id: insertedSource.id,
+      source_id: insertedSource.source_id,
       message: "Component intake record created. Ready for sanitization.",
     },
     200,
