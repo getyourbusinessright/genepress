@@ -44,29 +44,20 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
-  // Parse request body
-  let body: Record<string, unknown>;
+  // Parse multipart/form-data
+  let formData: FormData;
   try {
-    body = await req.json();
+    formData = await req.formData();
   } catch {
-    return badRequest("Invalid JSON body");
+    return badRequest("Expected multipart/form-data");
   }
 
-  const {
-    source_type,
-    component_name,
-    category,
-    json_content,
-    rights_status,
-    acquisition_method,
-  } = body as {
-    source_type?: string;
-    component_name?: string;
-    category?: string;
-    json_content?: unknown;
-    rights_status?: string;
-    acquisition_method?: string;
-  };
+  const source_type = formData.get("source_type") as string | null;
+  const component_name = formData.get("component_name") as string | null;
+  const category = formData.get("category") as string | null;
+  const rights_status = formData.get("rights_status") as string | null;
+  const acquisition_method = formData.get("acquisition_method") as string | null;
+  const json_file = formData.get("json_file") as File | null;
 
   // --- Validation ---
 
@@ -96,24 +87,6 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  if (
-    !json_content ||
-    typeof json_content !== "object" ||
-    Array.isArray(json_content)
-  ) {
-    return badRequest("json_content must be a valid object");
-  }
-
-  if (
-    !Array.isArray(
-      (json_content as Record<string, unknown>).content,
-    )
-  ) {
-    return badRequest(
-      "json_content must have a content array at the root",
-    );
-  }
-
   if (!rights_status || !(VALID_RIGHTS_STATUSES as readonly string[]).includes(rights_status)) {
     return badRequest(
       "rights_status must be one of: verified, assumed, disputed, restricted",
@@ -122,6 +95,28 @@ Deno.serve(async (req: Request) => {
 
   if (!acquisition_method || typeof acquisition_method !== "string") {
     return badRequest("acquisition_method is required");
+  }
+
+  if (!json_file || !(json_file instanceof File)) {
+    return badRequest("json_file is required");
+  }
+
+  // Parse and validate uploaded JSON file
+  let json_content: Record<string, unknown>;
+  let fileText: string;
+  try {
+    fileText = await json_file.text();
+    const parsed = JSON.parse(fileText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return badRequest("invalid_json_file");
+    }
+    json_content = parsed as Record<string, unknown>;
+  } catch {
+    return badRequest("invalid_json_file");
+  }
+
+  if (!Array.isArray(json_content.content)) {
+    return badRequest("json_content must have a content array at the root");
   }
 
   // --- Supabase client (service role — bypasses RLS) ---
@@ -151,7 +146,7 @@ Deno.serve(async (req: Request) => {
   const sequence = String((count ?? 0) + 1).padStart(3, "0");
   const component_id = `cmp_${category}_${descriptor}_${sequence}`;
 
-  // --- MD5 checksum via Deno std crypto (extends WebCrypto with MD5 support) ---
+  // --- MD5 checksum via Deno std crypto ---
   const jsonString = JSON.stringify(json_content);
   const msgBuffer = new TextEncoder().encode(jsonString);
   const hashBuffer = await crypto.subtle.digest("MD5", msgBuffer);
@@ -159,6 +154,27 @@ Deno.serve(async (req: Request) => {
   const source_checksum = hashArray
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+
+  // --- Upload raw file to Supabase Storage ---
+  const storagePath = `${component_id}/${component_id}_source.json`;
+  const fileBytes = new TextEncoder().encode(fileText);
+
+  const { error: uploadError } = await supabase.storage
+    .from("genepress-source-artifacts")
+    .upload(storagePath, fileBytes, {
+      contentType: "application/json",
+      upsert: false,
+    });
+
+  if (uploadError) {
+    console.error("Storage upload failed:", uploadError.message);
+    return jsonResponse(
+      { error: "storage_upload_failed", details: uploadError.message },
+      500,
+    );
+  }
+
+  const raw_source_artifact_location = storagePath;
 
   // --- Insert into genepress_component_sources ---
   const { data: insertedSource, error: insertError } = await supabase
@@ -169,7 +185,7 @@ Deno.serve(async (req: Request) => {
       source_reference: component_name,
       source_checksum,
       sanitization_result: null,
-      raw_source_artifact_location: null,
+      raw_source_artifact_location,
       source_ingestion_date: new Date().toISOString(),
     })
     .select("source_id")
@@ -209,6 +225,7 @@ Deno.serve(async (req: Request) => {
       success: true,
       component_id,
       source_id: insertedSource.source_id,
+      raw_source_artifact_location,
       message: "Component intake record created. Ready for sanitization.",
     },
     200,
