@@ -6,66 +6,8 @@ import { supabase } from "../lib/supabase";
 type SmokeStatus = "pending" | "ok" | "error";
 type IntakeStatus = "idle" | "loading" | "ok" | "error";
 
-// Small sample of the call538 CTA component Elementor JSON
-const SAMPLE_CALL538_JSON = {
-  content: [
-    {
-      id: "call538sec",
-      elType: "section",
-      settings: {
-        structure: "20",
-        background_color: "#FFFFFF",
-        padding: { unit: "px", top: "80", right: "40", bottom: "80", left: "40" },
-      },
-      elements: [
-        {
-          id: "call538col1",
-          elType: "column",
-          settings: { _column_size: 50 },
-          elements: [
-            {
-              id: "call538h1",
-              elType: "widget",
-              widgetType: "heading",
-              settings: {
-                title: "Ready to Get Started?",
-                title_color: "#1A1A1A",
-                typography_font_size: { unit: "px", size: 42 },
-                typography_font_weight: "700",
-              },
-            },
-            {
-              id: "call538txt",
-              elType: "widget",
-              widgetType: "text-editor",
-              settings: {
-                editor: "<p>Take your business to the next level with our proven solutions.</p>",
-              },
-            },
-          ],
-        },
-        {
-          id: "call538col2",
-          elType: "column",
-          settings: { _column_size: 50 },
-          elements: [
-            {
-              id: "call538btn",
-              elType: "widget",
-              widgetType: "button",
-              settings: {
-                text: "Book a Call",
-                background_color: "#0066FF",
-                border_radius: { unit: "px", size: 8 },
-                typography_font_size: { unit: "px", size: 16 },
-              },
-            },
-          ],
-        },
-      ],
-    },
-  ],
-};
+const VALID_CATEGORIES = ["hero", "services", "testimonials", "about", "cta", "footer"] as const;
+type Category = typeof VALID_CATEGORIES[number];
 
 export default function Dashboard() {
   const [smokeStatus, setSmokeStatus] = useState<SmokeStatus>("pending");
@@ -76,8 +18,15 @@ export default function Dashboard() {
   const [intakeResult, setIntakeResult] = useState<{
     component_id: string;
     source_id: string;
+    raw_source_artifact_location: string;
   } | null>(null);
   const [intakeError, setIntakeError] = useState<string | null>(null);
+
+  // Form state
+  const [componentName, setComponentName] = useState("");
+  const [category, setCategory] = useState<Category>("cta");
+  const [rightsStatus, setRightsStatus] = useState("assumed");
+  const [jsonFile, setJsonFile] = useState<File | null>(null);
 
   useEffect(() => {
     if (ran.current) return;
@@ -91,7 +40,10 @@ export default function Dashboard() {
       });
   }, []);
 
-  async function handleTestIntake() {
+  async function handleIntakeSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!jsonFile) return;
+
     setIntakeStatus("loading");
     setIntakeResult(null);
     setIntakeError(null);
@@ -105,8 +57,16 @@ export default function Dashboard() {
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
       const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
+      const formData = new FormData();
+      formData.append("source_type", "elementor_json");
+      formData.append("component_name", componentName);
+      formData.append("category", category);
+      formData.append("rights_status", rightsStatus);
+      formData.append("acquisition_method", "manual_export");
+      formData.append("json_file", jsonFile);
+
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15_000);
+      const timeoutId = setTimeout(() => controller.abort(), 30_000);
 
       const intakeUrl = `${supabaseUrl}/functions/v1/gp-intake`;
       console.log("[gp-intake] fetching:", intakeUrl);
@@ -116,18 +76,10 @@ export default function Dashboard() {
         response = await fetch(intakeUrl, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
             Authorization: `Bearer ${session.access_token}`,
             apikey: anonKey,
           },
-          body: JSON.stringify({
-            source_type: "elementor_json",
-            component_name: "Call To Action 538",
-            category: "cta",
-            json_content: SAMPLE_CALL538_JSON,
-            rights_status: "assumed",
-            acquisition_method: "manual_export",
-          }),
+          body: formData,
           signal: controller.signal,
         });
       } catch (fetchErr) {
@@ -148,6 +100,7 @@ export default function Dashboard() {
       setIntakeResult({
         component_id: data.component_id,
         source_id: data.source_id,
+        raw_source_artifact_location: data.raw_source_artifact_location,
       });
     } catch (err) {
       setIntakeStatus("error");
@@ -156,7 +109,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-gray-50">
+    <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-gray-50 px-4">
       <h1 className="text-3xl font-bold text-gray-900">GenePress — authenticated</h1>
 
       <p className="text-sm text-gray-500">
@@ -174,23 +127,75 @@ export default function Dashboard() {
         )}
       </p>
 
-      <div className="flex flex-col items-center gap-3">
+      <form
+        onSubmit={handleIntakeSubmit}
+        className="flex w-full max-w-sm flex-col gap-3 rounded border border-gray-200 bg-white p-6 shadow-sm"
+      >
+        <h2 className="text-base font-semibold text-gray-800">Component Intake</h2>
+
+        <label className="flex flex-col gap-1 text-sm text-gray-700">
+          Component name
+          <input
+            type="text"
+            value={componentName}
+            onChange={(e) => setComponentName(e.target.value)}
+            required
+            placeholder="e.g. Call To Action 538"
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm text-gray-700">
+          Category
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value as Category)}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          >
+            {VALID_CATEGORIES.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm text-gray-700">
+          Rights status
+          <select
+            value={rightsStatus}
+            onChange={(e) => setRightsStatus(e.target.value)}
+            className="rounded border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          >
+            <option value="verified">verified</option>
+            <option value="assumed">assumed</option>
+            <option value="disputed">disputed</option>
+            <option value="restricted">restricted</option>
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm text-gray-700">
+          JSON file
+          <input
+            type="file"
+            accept=".json"
+            required
+            onChange={(e) => setJsonFile(e.target.files?.[0] ?? null)}
+            className="text-sm text-gray-600"
+          />
+        </label>
+
         <button
-          onClick={handleTestIntake}
-          disabled={intakeStatus === "loading"}
+          type="submit"
+          disabled={intakeStatus === "loading" || !jsonFile}
           className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
         >
-          {intakeStatus === "loading" ? "Submitting…" : "Test Intake"}
+          {intakeStatus === "loading" ? "Uploading…" : "Submit Intake"}
         </button>
 
         {intakeStatus === "ok" && intakeResult && (
           <div className="rounded border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-            <p>
-              <span className="font-medium">component_id:</span> {intakeResult.component_id}
-            </p>
-            <p>
-              <span className="font-medium">source_id:</span> {intakeResult.source_id}
-            </p>
+            <p><span className="font-medium">component_id:</span> {intakeResult.component_id}</p>
+            <p><span className="font-medium">source_id:</span> {intakeResult.source_id}</p>
+            <p><span className="font-medium">storage path:</span> {intakeResult.raw_source_artifact_location}</p>
           </div>
         )}
 
@@ -199,7 +204,7 @@ export default function Dashboard() {
             ✗ Intake failed: {intakeError}
           </p>
         )}
-      </div>
+      </form>
 
       <button
         onClick={signOut}
