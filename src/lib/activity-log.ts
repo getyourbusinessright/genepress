@@ -18,28 +18,25 @@ export async function logActivity(
   beforeState: Json,
   afterState: Json,
 ): Promise<void> {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
+  const { data: { user } } = await supabase.auth.getUser();
 
-    const row: ActivityLogInsert = {
-      action_type: actionType,
-      component_id: componentId,
-      before_state: beforeState,
-      after_state: afterState,
-      actor: user?.id ?? null,
-    };
+  const row: ActivityLogInsert = {
+    action_type: actionType,
+    component_id: componentId,
+    before_state: beforeState,
+    after_state: afterState,
+    actor: user?.id ?? null,
+  };
 
-    const { error } = await db
-      .from("genepress_activity_log")
-      .insert(row);
+  const { error } = await db
+    .from("genepress_activity_log")
+    .insert(row);
 
-    if (error) {
-      throw error;
-    }
-  } catch (err) {
-    Sentry.captureException(err, {
+  if (error) {
+    Sentry.captureException(error, {
       tags: { context: "activity_log" },
       extra: { actionType, componentId },
     });
+    throw error;
   }
 }

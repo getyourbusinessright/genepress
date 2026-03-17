@@ -6,16 +6,19 @@ type SmokeStatus = "pending" | "ok" | "error";
 
 export default function Dashboard() {
   const [smokeStatus, setSmokeStatus] = useState<SmokeStatus>("pending");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const ran = useRef(false);
 
   useEffect(() => {
-    // Guard against StrictMode double-invoke
     if (ran.current) return;
     ran.current = true;
 
     logActivity("auth_test", null, null, { status: "ok" })
       .then(() => setSmokeStatus("ok"))
-      .catch(() => setSmokeStatus("error"));
+      .catch((err) => {
+        setSmokeStatus("error");
+        setErrorMsg(err?.message ?? String(err));
+      });
   }, []);
 
   return (
@@ -26,7 +29,7 @@ export default function Dashboard() {
         Activity log smoke test:{" "}
         {smokeStatus === "pending" && <span className="text-gray-400">writing…</span>}
         {smokeStatus === "ok" && <span className="font-medium text-green-600">✓ row written to genepress_activity_log</span>}
-        {smokeStatus === "error" && <span className="font-medium text-red-600">✗ write failed — check Sentry</span>}
+        {smokeStatus === "error" && <span className="font-medium text-red-600">✗ write failed{errorMsg ? `: ${errorMsg}` : ""}</span>}
       </p>
 
       <button
