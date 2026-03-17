@@ -1,6 +1,8 @@
 import * as Sentry from "@sentry/react";
 import { db, supabase } from "./supabase";
-import type { Json } from "../types/database";
+import type { Json, Database } from "../types/database";
+
+type ActivityLogInsert = Database["public"]["Tables"]["genepress_activity_log"]["Insert"];
 
 /**
  * Writes a row to genepress_activity_log.
@@ -9,11 +11,6 @@ import type { Json } from "../types/database";
  * there is a complete audit trail in Supabase. Write failures are captured
  * by Sentry but do NOT throw — a logging failure must never block the action
  * that triggered it.
- *
- * @param actionType  - What happened, e.g. 'auth_test', 'compile', 'publish'
- * @param componentId - genepress_component_sources.id (null for non-component actions)
- * @param beforeState - Snapshot of state before the action (null if not applicable)
- * @param afterState  - Snapshot of state after the action (null if not applicable)
  */
 export async function logActivity(
   actionType: string,
@@ -24,15 +21,17 @@ export async function logActivity(
   try {
     const { data: { user } } = await supabase.auth.getUser();
 
+    const row: ActivityLogInsert = {
+      action_type: actionType,
+      component_id: componentId,
+      before_state: beforeState,
+      after_state: afterState,
+      actor: user?.id ?? null,
+    };
+
     const { error } = await db
       .from("genepress_activity_log")
-      .insert({
-        action_type: actionType,
-        component_id: componentId,
-        before_state: beforeState,
-        after_state: afterState,
-        actor: user?.id ?? null,
-      });
+      .insert(row);
 
     if (error) {
       throw error;
