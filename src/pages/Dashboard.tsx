@@ -103,21 +103,38 @@ export default function Dashboard() {
       if (!session) throw new Error("No active session");
 
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
-      const response = await fetch(`${supabaseUrl}/functions/v1/gp-intake`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          source_type: "elementor_json",
-          component_name: "Call To Action 538",
-          category: "cta",
-          json_content: SAMPLE_CALL538_JSON,
-          rights_status: "assumed",
-          acquisition_method: "manual_export",
-        }),
-      });
+      const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15_000);
+
+      let response: Response;
+      try {
+        response = await fetch(`${supabaseUrl}/functions/v1/gp-intake`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+            apikey: anonKey,
+          },
+          body: JSON.stringify({
+            source_type: "elementor_json",
+            component_name: "Call To Action 538",
+            category: "cta",
+            json_content: SAMPLE_CALL538_JSON,
+            rights_status: "assumed",
+            acquisition_method: "manual_export",
+          }),
+          signal: controller.signal,
+        });
+      } catch (fetchErr) {
+        if ((fetchErr as Error)?.name === "AbortError") {
+          throw new Error("Request timed out.");
+        }
+        throw fetchErr;
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       const data = await response.json();
       if (!response.ok) {
