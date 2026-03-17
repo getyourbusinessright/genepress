@@ -194,7 +194,7 @@ export type Database = {
           component_id: string | null;
           before_state: Json | null;
           after_state: Json | null;
-          actor: string | null;
+          performed_by: string | null;
         };
         Insert: {
           id?: string;
@@ -203,7 +203,7 @@ export type Database = {
           component_id?: string | null;
           before_state?: Json | null;
           after_state?: Json | null;
-          actor?: string | null;
+          performed_by?: string | null;
         };
         Update: {
           id?: string;
@@ -212,7 +212,7 @@ export type Database = {
           component_id?: string | null;
           before_state?: Json | null;
           after_state?: Json | null;
-          actor?: string | null;
+          performed_by?: string | null;
         };
         Relationships: [];
       };

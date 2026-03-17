@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import type { User } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import { isSuperAdmin as checkSuperAdmin } from "../lib/auth";
@@ -19,6 +19,7 @@ interface AuthState {
  */
 export function useAuth(): AuthState {
   const navigate = useNavigate();
+  const location = useLocation();
   const [state, setState] = useState<AuthState>({
     user: null,
     isSuperAdmin: false,
@@ -33,14 +34,14 @@ export function useAuth(): AuthState {
 
         setState({ user, isSuperAdmin: superAdmin, loading: false });
 
-        if (!user || !superAdmin) {
+        if ((!user || !superAdmin) && location.pathname !== "/login") {
           navigate("/login", { replace: true });
         }
       },
     );
 
     return () => subscription.unsubscribe();
-  }, [navigate]);
+  }, [navigate, location.pathname]);
 
   return state;
 }
