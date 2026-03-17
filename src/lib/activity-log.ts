@@ -25,7 +25,7 @@ export async function logActivity(
     component_id: componentId,
     before_state: beforeState,
     after_state: afterState,
-    actor: user?.id ?? null,
+    performed_by: user?.id ?? null,
   };
 
   const { error } = await db
