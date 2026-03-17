@@ -108,9 +108,12 @@ export default function Dashboard() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15_000);
 
+      const intakeUrl = `${supabaseUrl}/functions/v1/gp-intake`;
+      console.log("[gp-intake] fetching:", intakeUrl);
+
       let response: Response;
       try {
-        response = await fetch(`${supabaseUrl}/functions/v1/gp-intake`, {
+        response = await fetch(intakeUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

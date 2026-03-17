@@ -47,4 +47,4 @@ inspector_port = 8083
 
 [functions.gp-intake]
 enabled = true
-verify_jwt = true
+verify_jwt = false
