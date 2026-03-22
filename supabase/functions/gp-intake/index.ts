@@ -1,6 +1,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { crypto } from "https://deno.land/std@0.208.0/crypto/mod.ts";
 import { sanitizeElementorJson } from "./sanitize.ts";
+import { parseSource } from "./parse.ts";
+import type { SanitizedPayload } from "./parse.ts";
+import { classifyHeuristic } from "./classify-heuristic.ts";
+import { classifyWithAI } from "./classify-ai.ts";
+import { extractSlots } from "./slot-extractor.ts";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -287,17 +292,163 @@ Deno.serve(async (req: Request) => {
     }, 422);
   }
 
-  // --- Success response ---
-  return jsonResponse(
-    {
-      success: true,
+  // ─── Classification pipeline ─────────────────────────────────────────────
+
+  // Mark as classification_in_progress
+  await supabase
+    .from("genepress_components")
+    .update({ status: "classification_in_progress" })
+    .eq("component_id", component_id);
+
+  // Step 1: Parse
+  const sanitizedPayload: SanitizedPayload = {
+    component_id,
+    source_type: "elementor_json",
+    json_content,
+  };
+
+  const parseResult = parseSource(sanitizedPayload);
+
+  if (parseResult.parse_error) {
+    await supabase
+      .from("genepress_components")
+      .update({ status: "parse_failed" })
+      .eq("component_id", component_id);
+
+    const { error: parseFailLogError } = await supabase.rpc(
+      "log_genepress_activity",
+      {
+        p_component_id: component_id,
+        p_action_type: "parse_failed",
+        p_actor: "system",
+        p_before_state: { status: "classification_in_progress" },
+        p_after_state: { parse_error: parseResult.parse_error },
+      },
+    );
+
+    if (parseFailLogError) {
+      console.error(
+        "Activity log write failed [parse_failed]:",
+        JSON.stringify(parseFailLogError),
+      );
+    }
+
+    return jsonResponse(
+      { error: "parse_failed", details: parseResult.parse_error },
+      422,
+    );
+  }
+
+  // Step 2: Heuristic classification (3a — deterministic, no AI)
+  let classifiedRegions = classifyHeuristic(parseResult.raw_regions);
+
+  // Step 3: AI classification pass (3b — conditional, only for low-confidence)
+  const hasLowConfidence = classifiedRegions.some((r) => r.confidence === "low");
+  if (hasLowConfidence) {
+    classifiedRegions = await classifyWithAI(
+      classifiedRegions,
+      raw_source_artifact_location, // component context: storage path serves as identifier
       component_id,
-      source_id: insertedSource.source_id,
-      raw_source_artifact_location,
-      sanitization_result: sanitization.result,
-      sanitization_warnings: sanitization.warnings,
-      message: "Component intake and sanitization complete. Ready for parse.",
-    },
-    200,
-  );
+      supabase,
+    );
+  }
+
+  // Step 4: Slot extraction
+  const slotResult = extractSlots(classifiedRegions);
+
+  // Step 5a / 5b: Update status and store slot data
+  const slotUpdatePayload = {
+    slot_definitions: slotResult.slot_definitions,
+    unresolved_slots: slotResult.has_unresolved
+      ? slotResult.unresolved_regions
+      : null,
+  };
+
+  if (!slotResult.has_unresolved) {
+    // 5a: All slots resolved — classification complete
+    await supabase
+      .from("genepress_components")
+      .update({ status: "classification_complete", ...slotUpdatePayload })
+      .eq("component_id", component_id);
+
+    const { error: classCompleteLogError } = await supabase.rpc(
+      "log_genepress_activity",
+      {
+        p_component_id: component_id,
+        p_action_type: "classification_complete",
+        p_actor: "system",
+        p_before_state: { status: "classification_in_progress" },
+        p_after_state: { slot_count: slotResult.slot_definitions.length },
+      },
+    );
+
+    if (classCompleteLogError) {
+      console.error(
+        "Activity log write failed [classification_complete]:",
+        JSON.stringify(classCompleteLogError),
+      );
+    }
+
+    return jsonResponse(
+      {
+        success: true,
+        component_id,
+        source_id: insertedSource.source_id,
+        raw_source_artifact_location,
+        sanitization_result: sanitization.result,
+        sanitization_warnings: sanitization.warnings,
+        classification_status: "classification_complete",
+        slot_count: slotResult.slot_definitions.length,
+        message: "Component intake, sanitization, and classification complete.",
+      },
+      200,
+    );
+  } else {
+    // 5b: Some slots remain unresolved — human review required (NOT an error, returns 200)
+    await supabase
+      .from("genepress_components")
+      .update({
+        status: "classification_review_required",
+        ...slotUpdatePayload,
+      })
+      .eq("component_id", component_id);
+
+    const { error: classReviewLogError } = await supabase.rpc(
+      "log_genepress_activity",
+      {
+        p_component_id: component_id,
+        p_action_type: "classification_review_required",
+        p_actor: "system",
+        p_before_state: { status: "classification_in_progress" },
+        p_after_state: {
+          unresolved_count: slotResult.unresolved_regions.length,
+        },
+      },
+    );
+
+    if (classReviewLogError) {
+      console.error(
+        "Activity log write failed [classification_review_required]:",
+        JSON.stringify(classReviewLogError),
+      );
+    }
+
+    return jsonResponse(
+      {
+        success: true,
+        component_id,
+        source_id: insertedSource.source_id,
+        raw_source_artifact_location,
+        sanitization_result: sanitization.result,
+        sanitization_warnings: sanitization.warnings,
+        classification_status: "classification_review_required",
+        slot_count: slotResult.slot_definitions.length,
+        unresolved_count: slotResult.unresolved_regions.length,
+        message:
+          "Component intake and sanitization complete. Some slots require human review before classification is finalised.",
+        requires_review: true,
+      },
+      200,
+    );
+  }
 });
