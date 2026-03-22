@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { crypto } from "https://deno.land/std@0.208.0/crypto/mod.ts";
+import { sanitizeElementorJson } from "./sanitize.ts";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -176,6 +177,30 @@ Deno.serve(async (req: Request) => {
 
   const raw_source_artifact_location = storagePath;
 
+  // --- Insert into genepress_components (parent row) ---
+  const { error: componentInsertError } = await supabase
+    .from("genepress_components")
+    .insert({
+      component_id,
+      display_name: component_name,
+      category,
+      status: "intake_received",
+      rights_status,
+      acquisition_method,
+      source_origin: "sections_express",
+      marketplace_safe: false,
+      internal_use_only: true,
+      creator_attribution: null,
+    });
+
+  if (componentInsertError) {
+    console.error("genepress_components insert failed:", componentInsertError.message);
+    return jsonResponse(
+      { error: "failed_to_create_component", details: componentInsertError.message },
+      500,
+    );
+  }
+
   // --- Insert into genepress_component_sources ---
   const { data: insertedSource, error: insertError } = await supabase
     .from("genepress_component_sources")
@@ -205,6 +230,7 @@ Deno.serve(async (req: Request) => {
     .insert({
       action_type: "intake_created",
       component_id,
+      actor: "system",
       before_state: null,
       after_state: {
         source_type: "elementor_json",
@@ -219,6 +245,47 @@ Deno.serve(async (req: Request) => {
     console.error("Activity log write failed:", logError.message);
   }
 
+  // --- Sanitization ---
+  const sanitization = sanitizeElementorJson(json_content);
+
+  // Update genepress_component_sources with sanitization result
+  await supabase
+    .from("genepress_component_sources")
+    .update({ sanitization_result: sanitization.result })
+    .eq("source_id", insertedSource.source_id);
+
+  // Update genepress_components status
+  const newStatus = sanitization.result === "fail"
+    ? "sanitization_failed"
+    : "sanitization_passed";
+
+  await supabase
+    .from("genepress_components")
+    .update({ status: newStatus })
+    .eq("component_id", component_id);
+
+  // Log sanitization result
+  await supabase.from("genepress_activity_log").insert({
+    action_type: "sanitization_complete",
+    component_id,
+    actor: "system",
+    before_state: { status: "intake_received" },
+    after_state: {
+      status: newStatus,
+      sanitization_result: sanitization.result,
+      failures: sanitization.failures,
+      warnings: sanitization.warnings,
+    },
+  });
+
+  // Hard stop on sanitization failure
+  if (sanitization.result === "fail") {
+    return jsonResponse({
+      error: "sanitization_failed",
+      failures: sanitization.failures,
+    }, 422);
+  }
+
   // --- Success response ---
   return jsonResponse(
     {
@@ -226,7 +293,9 @@ Deno.serve(async (req: Request) => {
       component_id,
       source_id: insertedSource.source_id,
       raw_source_artifact_location,
-      message: "Component intake record created. Ready for sanitization.",
+      sanitization_result: sanitization.result,
+      sanitization_warnings: sanitization.warnings,
+      message: "Component intake and sanitization complete. Ready for parse.",
     },
     200,
   );
