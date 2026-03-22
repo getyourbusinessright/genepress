@@ -234,7 +234,6 @@ Deno.serve(async (req: Request) => {
     p_component_id: component_id,
     p_action_type: "intake_created",
     p_actor: "system",
-    p_performed_by: null,
     p_before_state: null,
     p_after_state: {
       source_type: "elementor_json",
@@ -272,7 +271,6 @@ Deno.serve(async (req: Request) => {
     p_component_id: component_id,
     p_action_type: "sanitization_complete",
     p_actor: "system",
-    p_performed_by: null,
     p_before_state: { status: "intake_received" },
     p_after_state: {
       status: newStatus,
@@ -323,7 +321,6 @@ Deno.serve(async (req: Request) => {
         p_component_id: component_id,
         p_action_type: "parse_failed",
         p_actor: "system",
-        p_performed_by: null,
         p_before_state: { status: "classification_in_progress" },
         p_after_state: { parse_error: parseResult.parse_error },
       },
@@ -380,7 +377,6 @@ Deno.serve(async (req: Request) => {
         p_component_id: component_id,
         p_action_type: "classification_complete",
         p_actor: "system",
-        p_performed_by: null,
         p_before_state: { status: "classification_in_progress" },
         p_after_state: { slot_count: slotResult.slot_definitions.length },
       },
@@ -423,7 +419,6 @@ Deno.serve(async (req: Request) => {
         p_component_id: component_id,
         p_action_type: "classification_review_required",
         p_actor: "system",
-        p_performed_by: null,
         p_before_state: { status: "classification_in_progress" },
         p_after_state: {
           unresolved_count: slotResult.unresolved_regions.length,
