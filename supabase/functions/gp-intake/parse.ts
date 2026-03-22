@@ -54,13 +54,19 @@ function parseElementor(
 
       const region_id = `region_${regionIndex++}`;
 
-      // element_name: prefer settings.title, fall back to element.id
+      // element_name: try in order — settings.title, settings._title,
+      // widgetType_index, then fall back to element.id.
       let element_name: string | null = null;
       if (element.settings && typeof element.settings === "object") {
         const settings = element.settings as Record<string, unknown>;
         if (typeof settings.title === "string" && settings.title.trim()) {
           element_name = settings.title.trim();
+        } else if (typeof settings._title === "string" && settings._title.trim()) {
+          element_name = settings._title.trim();
         }
+      }
+      if (!element_name && typeof element.widgetType === "string" && element.widgetType) {
+        element_name = `${element.widgetType}_${i}`;
       }
       if (!element_name && typeof element.id === "string" && element.id) {
         element_name = element.id;
