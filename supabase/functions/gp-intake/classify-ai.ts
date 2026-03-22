@@ -153,6 +153,7 @@ export async function classifyWithAI(
         p_component_id: component_id,
         p_action_type: "slot_classification_ai",
         p_actor: "system",
+        p_performed_by: null,
         p_before_state: { slot_type: "unclassified", confidence: "low" },
         p_after_state: {
           tokens_used,
