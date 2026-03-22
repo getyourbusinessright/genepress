@@ -242,7 +242,7 @@ Deno.serve(async (req: Request) => {
 
   if (logError) {
     // Log the error but don't fail the request — logging must not block the pipeline
-    console.error("Activity log write failed:", logError.message);
+    console.error("Activity log write failed [intake_created]:", JSON.stringify(logError));
   }
 
   // --- Sanitization ---
@@ -265,7 +265,7 @@ Deno.serve(async (req: Request) => {
     .eq("component_id", component_id);
 
   // Log sanitization result
-  await supabase.from("genepress_activity_log").insert({
+  const { error: sanitizationLogError } = await supabase.from("genepress_activity_log").insert({
     action_type: "sanitization_complete",
     component_id,
     actor: "system",
@@ -277,6 +277,10 @@ Deno.serve(async (req: Request) => {
       warnings: sanitization.warnings,
     },
   });
+
+  if (sanitizationLogError) {
+    console.error("Activity log write failed [sanitization_complete]:", JSON.stringify(sanitizationLogError));
+  }
 
   // Hard stop on sanitization failure
   if (sanitization.result === "fail") {
