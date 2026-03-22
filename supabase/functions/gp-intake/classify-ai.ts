@@ -20,7 +20,7 @@ const VALID_SLOT_TYPES: SlotType[] = [
 
 // ─── Sentry reporting (lightweight, no SDK required in Deno) ──────────────────
 
-async function reportToSentry(data: {
+export async function reportToSentry(data: {
   component_id: string;
   checkpoint: string;
   error_class: string;

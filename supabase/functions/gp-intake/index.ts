@@ -4,7 +4,7 @@ import { sanitizeElementorJson } from "./sanitize.ts";
 import { parseSource } from "./parse.ts";
 import type { SanitizedPayload } from "./parse.ts";
 import { classifyHeuristic } from "./classify-heuristic.ts";
-import { classifyWithAI } from "./classify-ai.ts";
+import { classifyWithAI, reportToSentry } from "./classify-ai.ts";
 import { extractSlots } from "./slot-extractor.ts";
 
 const CORS_HEADERS = {
@@ -353,102 +353,158 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  // Step 4: Slot extraction
-  const slotResult = extractSlots(classifiedRegions);
+  // Step 4 + 5: Slot extraction and status update — wrapped so any uncaught
+  // error is surfaced rather than leaving the record stuck at
+  // classification_in_progress.
+  try {
+    // Step 4: Slot extraction
+    const slotResult = extractSlots(classifiedRegions);
 
-  // Step 5a / 5b: Update status and store slot data
-  const slotUpdatePayload = {
-    slot_definitions: slotResult.slot_definitions,
-    unresolved_slots: slotResult.has_unresolved
-      ? slotResult.unresolved_regions
-      : null,
-  };
+    // Step 5a / 5b: Update status and store slot data
+    const slotUpdatePayload = {
+      slot_definitions: slotResult.slot_definitions,
+      unresolved_slots: slotResult.has_unresolved
+        ? slotResult.unresolved_regions
+        : null,
+    };
 
-  if (!slotResult.has_unresolved) {
-    // 5a: All slots resolved — classification complete
-    await supabase
-      .from("genepress_components")
-      .update({ status: "classification_complete", ...slotUpdatePayload })
-      .eq("component_id", component_id);
+    if (!slotResult.has_unresolved) {
+      // 5a: All slots resolved — classification complete
+      const { error: step5aError } = await supabase
+        .from("genepress_components")
+        .update({ status: "classification_complete", ...slotUpdatePayload })
+        .eq("component_id", component_id);
 
-    const { error: classCompleteLogError } = await supabase.rpc(
-      "log_genepress_activity",
-      {
-        p_component_id: component_id,
-        p_action_type: "classification_complete",
-        p_actor: "system",
-        p_before_state: { status: "classification_in_progress" },
-        p_after_state: { slot_count: slotResult.slot_definitions.length },
-      },
-    );
+      if (step5aError) {
+        console.error(
+          "[Step 5a] genepress_components status update failed for",
+          component_id,
+          "—",
+          step5aError.message,
+          JSON.stringify(step5aError),
+        );
+        await reportToSentry({
+          component_id,
+          checkpoint: "step_5a_status_update",
+          error_class: step5aError.code ?? "SupabaseError",
+          error_detail: step5aError.message,
+        });
+      }
 
-    if (classCompleteLogError) {
-      console.error(
-        "Activity log write failed [classification_complete]:",
-        JSON.stringify(classCompleteLogError),
-      );
-    }
-
-    return jsonResponse(
-      {
-        success: true,
-        component_id,
-        source_id: insertedSource.source_id,
-        raw_source_artifact_location,
-        sanitization_result: sanitization.result,
-        sanitization_warnings: sanitization.warnings,
-        classification_status: "classification_complete",
-        slot_count: slotResult.slot_definitions.length,
-        message: "Component intake, sanitization, and classification complete.",
-      },
-      200,
-    );
-  } else {
-    // 5b: Some slots remain unresolved — human review required (NOT an error, returns 200)
-    await supabase
-      .from("genepress_components")
-      .update({
-        status: "classification_review_required",
-        ...slotUpdatePayload,
-      })
-      .eq("component_id", component_id);
-
-    const { error: classReviewLogError } = await supabase.rpc(
-      "log_genepress_activity",
-      {
-        p_component_id: component_id,
-        p_action_type: "classification_review_required",
-        p_actor: "system",
-        p_before_state: { status: "classification_in_progress" },
-        p_after_state: {
-          unresolved_count: slotResult.unresolved_regions.length,
+      const { error: classCompleteLogError } = await supabase.rpc(
+        "log_genepress_activity",
+        {
+          p_component_id: component_id,
+          p_action_type: "classification_complete",
+          p_actor: "system",
+          p_before_state: { status: "classification_in_progress" },
+          p_after_state: { slot_count: slotResult.slot_definitions.length },
         },
-      },
-    );
+      );
 
-    if (classReviewLogError) {
-      console.error(
-        "Activity log write failed [classification_review_required]:",
-        JSON.stringify(classReviewLogError),
+      if (classCompleteLogError) {
+        console.error(
+          "Activity log write failed [classification_complete]:",
+          JSON.stringify(classCompleteLogError),
+        );
+      }
+
+      return jsonResponse(
+        {
+          success: true,
+          component_id,
+          source_id: insertedSource.source_id,
+          raw_source_artifact_location,
+          sanitization_result: sanitization.result,
+          sanitization_warnings: sanitization.warnings,
+          classification_status: "classification_complete",
+          slot_count: slotResult.slot_definitions.length,
+          message: "Component intake, sanitization, and classification complete.",
+        },
+        200,
+      );
+    } else {
+      // 5b: Some slots remain unresolved — human review required (NOT an error, returns 200)
+      const { error: step5bError } = await supabase
+        .from("genepress_components")
+        .update({
+          status: "classification_review_required",
+          ...slotUpdatePayload,
+        })
+        .eq("component_id", component_id);
+
+      if (step5bError) {
+        console.error(
+          "[Step 5b] genepress_components status update failed for",
+          component_id,
+          "—",
+          step5bError.message,
+          JSON.stringify(step5bError),
+        );
+        await reportToSentry({
+          component_id,
+          checkpoint: "step_5b_status_update",
+          error_class: step5bError.code ?? "SupabaseError",
+          error_detail: step5bError.message,
+        });
+      }
+
+      const { error: classReviewLogError } = await supabase.rpc(
+        "log_genepress_activity",
+        {
+          p_component_id: component_id,
+          p_action_type: "classification_review_required",
+          p_actor: "system",
+          p_before_state: { status: "classification_in_progress" },
+          p_after_state: {
+            unresolved_count: slotResult.unresolved_regions.length,
+          },
+        },
+      );
+
+      if (classReviewLogError) {
+        console.error(
+          "Activity log write failed [classification_review_required]:",
+          JSON.stringify(classReviewLogError),
+        );
+      }
+
+      return jsonResponse(
+        {
+          success: true,
+          component_id,
+          source_id: insertedSource.source_id,
+          raw_source_artifact_location,
+          sanitization_result: sanitization.result,
+          sanitization_warnings: sanitization.warnings,
+          classification_status: "classification_review_required",
+          slot_count: slotResult.slot_definitions.length,
+          unresolved_count: slotResult.unresolved_regions.length,
+          message:
+            "Component intake and sanitization complete. Some slots require human review before classification is finalised.",
+          requires_review: true,
+        },
+        200,
       );
     }
-
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(
+      "[Step 5] Unexpected error during slot extraction / status update for",
+      component_id,
+      "—",
+      errMsg,
+      err,
+    );
+    await reportToSentry({
+      component_id,
+      checkpoint: "step_5_slot_extraction",
+      error_class: err instanceof Error ? err.constructor.name : "UnknownError",
+      error_detail: errMsg,
+    });
     return jsonResponse(
-      {
-        success: true,
-        component_id,
-        source_id: insertedSource.source_id,
-        raw_source_artifact_location,
-        sanitization_result: sanitization.result,
-        sanitization_warnings: sanitization.warnings,
-        classification_status: "classification_review_required",
-        slot_count: slotResult.slot_definitions.length,
-        unresolved_count: slotResult.unresolved_regions.length,
-        message:
-          "Component intake and sanitization complete. Some slots require human review before classification is finalised.",
-        requires_review: true,
-      },
-      200,
+      { error: "classification_error", details: errMsg, component_id },
+      500,
     );
   }
 });
