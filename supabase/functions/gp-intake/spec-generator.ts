@@ -4,6 +4,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import type { ParseResult } from "./parse.ts";
+import type { ClassifiedRegion } from "./classify-heuristic.ts";
 import type { SlotDefinition } from "./slot-extractor.ts";
 
 export const PARSER_VERSION = "gp_parser_v1";
@@ -55,8 +56,53 @@ export type GenerateSpecResult = {
 
 // ─── Slot transformation ──────────────────────────────────────────────────────
 
-function toStructuralSlotType(semanticType: string): "singleton" | "repeating_group" {
-  return semanticType === "list" ? "repeating_group" : "singleton";
+/**
+ * Returns true when the region's raw JSON indicates a genuinely repeating
+ * container structure — multiple child items of the same shape.
+ *
+ * Two concrete patterns are detected:
+ *   1. Elementor icon-list widget: settings.icon_list is an array with ≥ 2 entries.
+ *      This is the canonical repeating-item container in Elementor.
+ *   2. Generic elements/children array whose direct children all share the same
+ *      widgetType / elType / Figma type (uniform shape), with ≥ 2 children.
+ *      A single child never constitutes a repeating group.
+ *
+ * Semantic type is intentionally NOT used here — a region classified as "list"
+ * may still be singleton if the source only contains one configured item.
+ */
+function isRepeatingContainer(region: ClassifiedRegion): boolean {
+  const raw = region.raw_json as Record<string, unknown>;
+  const settings = (raw.settings && typeof raw.settings === "object" && !Array.isArray(raw.settings))
+    ? (raw.settings as Record<string, unknown>)
+    : {};
+
+  // Pattern 1: Elementor icon-list — items live in settings.icon_list
+  if (typeof raw.widgetType === "string" && raw.widgetType === "icon-list") {
+    return Array.isArray(settings.icon_list) && settings.icon_list.length >= 2;
+  }
+
+  // Pattern 2: any element with a uniform-type children array (Elementor elements or Figma children)
+  const childArrayKey = Array.isArray(raw.elements) ? "elements"
+    : Array.isArray(raw.children) ? "children"
+    : null;
+
+  if (childArrayKey) {
+    const kids = raw[childArrayKey] as Record<string, unknown>[];
+    if (kids.length < 2) return false;
+
+    // Determine the shape key to compare across children
+    const typeOf = (c: Record<string, unknown>): string | null =>
+      typeof c.widgetType === "string" && c.widgetType ? c.widgetType
+        : typeof c.elType === "string" && c.elType ? c.elType
+        : typeof c.type === "string" && c.type ? c.type
+        : null;
+
+    const firstType = typeOf(kids[0]);
+    if (!firstType) return false;
+    return kids.every((c) => typeOf(c) === firstType);
+  }
+
+  return false;
 }
 
 /**
@@ -86,9 +132,14 @@ function buildItemSlots(parentSlotName: string): SpecSlotDefinition[] {
   ];
 }
 
-function buildSpecSlotDefinitions(rawSlots: SlotDefinition[]): SpecSlotDefinition[] {
+function buildSpecSlotDefinitions(
+  rawSlots: SlotDefinition[],
+  regionById: Map<string, ClassifiedRegion>,
+): SpecSlotDefinition[] {
   return rawSlots.map((s) => {
-    const structural_type = toStructuralSlotType(s.slot_type);
+    const region = regionById.get(s.region_id);
+    const structural_type: "singleton" | "repeating_group" =
+      region && isRepeatingContainer(region) ? "repeating_group" : "singleton";
 
     const constraints: Record<string, unknown> = {};
     if (s.max_chars !== null) constraints.max_chars = s.max_chars;
@@ -368,21 +419,29 @@ export function validateSpecSchema(spec: {
 export async function generateAndPersistSpec(
   supabase: ReturnType<typeof createClient>,
   parseResult: ParseResult,
+  classifiedRegions: ClassifiedRegion[],
   rawSlots: SlotDefinition[],
   ctx: SpecIntakeContext,
 ): Promise<GenerateSpecResult> {
   const { component_id, source_id, source_checksum, parser_version, sanitization_status } = ctx;
 
-  // 1. Transform raw slot definitions into spec format (singleton / repeating_group)
-  const specSlotDefs = buildSpecSlotDefinitions(rawSlots);
+  // 1. Build a region lookup map so structural type detection can inspect raw_json
+  const regionById = new Map<string, ClassifiedRegion>(
+    classifiedRegions.map((r) => [r.region_id, r]),
+  );
 
-  // 2. Build the structural layout tree from parse output
+  // 2. Transform raw slot definitions into spec format (singleton / repeating_group)
+  //    slot_type is determined by structural inspection of the originating region,
+  //    not by semantic type.
+  const specSlotDefs = buildSpecSlotDefinitions(rawSlots, regionById);
+
+  // 3. Build the structural layout tree from parse output
   const structuralNodes = buildStructuralRules(parseResult, specSlotDefs);
 
-  // 3. Back-fill parent_container on each slot now that structural tree is ready
+  // 4. Back-fill parent_container on each slot now that structural tree is ready
   resolveParentContainers(specSlotDefs, structuralNodes);
 
-  // 4. Determine spec version: count existing specs for this component_id
+  // 5. Determine spec version: count existing specs for this component_id
   const { count: existingCount, error: countError } = await supabase
     .from("genepress_source_specs")
     .select("*", { count: "exact", head: true })

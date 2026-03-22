@@ -416,6 +416,7 @@ Deno.serve(async (req: Request) => {
         specResult = await generateAndPersistSpec(
           supabase,
           parseResult,
+          classifiedRegions,
           slotResult.slot_definitions,
           {
             component_id,
