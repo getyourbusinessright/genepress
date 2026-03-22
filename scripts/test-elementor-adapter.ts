@@ -38,7 +38,6 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   process.exit(1);
 }
 
-// Note key format for the record
 const keyType = SUPABASE_KEY.startsWith("sb_publishable_")
   ? "anon/publishable (sb_publishable_*) — NOTE: service role key expected; RLS may block writes"
   : SUPABASE_KEY.startsWith("sb_secret_")
@@ -47,9 +46,31 @@ const keyType = SUPABASE_KEY.startsWith("sb_publishable_")
   ? "service_role JWT (eyJ*)"
   : "unknown format";
 
-console.log(`Key type detected: ${keyType}\n`);
+console.log(`Key type detected: ${keyType}`);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ─── Mock Supabase (used for compile() when live DB is unreachable) ───────────
+
+type DbWrite = { table: string; operation: string; data: unknown };
+const dbWrites: DbWrite[] = [];
+
+const mockSupabase = {
+  from: (table: string) => ({
+    upsert: (data: unknown, _opts?: unknown) => {
+      dbWrites.push({ table, operation: "upsert", data });
+      return { error: null, then: (fn: (v: { error: null }) => unknown) => Promise.resolve(fn({ error: null })), catch: () => ({}) };
+    },
+    insert: (data: unknown) => {
+      dbWrites.push({ table, operation: "insert", data });
+      return { then: (fn: (v: { data: null; error: null }) => unknown) => Promise.resolve(fn({ data: null, error: null })), catch: () => ({}) };
+    },
+    update: (data: unknown) => {
+      dbWrites.push({ table, operation: "update", data });
+      return { eq: () => ({ then: (fn: (v: { data: null; error: null }) => unknown) => Promise.resolve(fn({ data: null, error: null })), catch: () => ({}) }) };
+    },
+  }),
+} as unknown as import("@supabase/supabase-js").SupabaseClient;
 
 // ─── CTA 538 fallback fixture ─────────────────────────────────────────────────
 //
@@ -293,7 +314,15 @@ async function main() {
   let specSource: "live_db" | "fixture";
 
   if (queryError) {
+    const isNetworkError = queryError.message?.includes("fetch failed") ||
+      queryError.message?.includes("CONNECT_TIMEOUT") ||
+      queryError.message?.includes("ConnectTimeout");
     console.log(`DB query error: ${queryError.message}`);
+    if (isNetworkError) {
+      console.log("  FINDING-02: Outbound HTTPS to Supabase is blocked in this sandbox environment.");
+      console.log("  DB query, compile() DB writes, and read-back verification cannot run live.");
+      console.log("  Adapter logic (compile + validate + structural check) tested via mock client.");
+    }
     console.log("  → falling back to constructed fixture\n");
     sourceSpec = CTA_538_FIXTURE;
     specSource = "fixture";
@@ -348,7 +377,14 @@ async function main() {
 
   // ── TASK 2: compile() ────────────────────────────────────────────────────────
   console.log("─── TASK 2: compile() ───────────────────────────────────────");
-  const adapter = createElementorAdapter(supabase);
+  // Use mock client when DB is unreachable so adapter logic can be fully tested.
+  // DB writes are captured in dbWrites[] for inspection.
+  const dbReachable = specSource === "live_db";
+  const adapterClient = dbReachable ? supabase : mockSupabase;
+  if (!dbReachable) {
+    console.log("(Using mock Supabase client — DB unreachable. DB writes captured in memory.)\n");
+  }
+  const adapter = createElementorAdapter(adapterClient);
   let compiled: CompiledVariant;
 
   try {
@@ -398,47 +434,67 @@ async function main() {
   // ── TASK 5: DB write verification ────────────────────────────────────────────
   console.log("─── TASK 5: DB write verification ───────────────────────────");
 
-  // Re-query genepress_compiled_variants for the variant we just wrote
-  const variantId = compiled.variant_id;
-  const { data: variantRow, error: variantErr } = await supabase
-    .from("genepress_compiled_variants")
-    .select("id, compile_status, adapter_version, export_safety_flags, fixture_suite_version")
-    .eq("id", variantId)
-    .single();
+  if (dbReachable) {
+    // Live DB path: read back the rows we wrote
+    const variantId = compiled.variant_id;
+    const { data: variantRow, error: variantErr } = await supabase
+      .from("genepress_compiled_variants")
+      .select("id, compile_status, adapter_version, export_safety_flags, fixture_suite_version")
+      .eq("id", variantId)
+      .single();
 
-  if (variantErr) {
-    console.log(`  genepress_compiled_variants read-back: ERROR — ${variantErr.message}`);
-    console.log("  compile_status written: UNKNOWN (read-back failed)");
-  } else if (!variantRow) {
-    console.log("  genepress_compiled_variants read-back: row not found");
-    console.log("  compile_status written: UNKNOWN");
+    if (variantErr) {
+      console.log(`  genepress_compiled_variants read-back: ERROR — ${variantErr.message}`);
+      console.log("  compile_status written: UNKNOWN (read-back failed)");
+    } else if (!variantRow) {
+      console.log("  genepress_compiled_variants read-back: row not found");
+    } else {
+      console.log("  genepress_compiled_variants row read back successfully:");
+      console.log(JSON.stringify(variantRow, null, 4).split("\n").map(l => "  " + l).join("\n"));
+      const statusOk = variantRow.compile_status === "success";
+      console.log(`\n  compile_status = "${variantRow.compile_status}" — ${statusOk ? "✓ correct" : "✗ WRONG"}`);
+    }
+
+    const { data: logRows, error: logErr } = await supabase
+      .from("genepress_activity_log")
+      .select("action_type, after_state, created_at")
+      .eq("component_id", sourceSpec.component_id)
+      .eq("action_type", "compile_succeeded")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (logErr) {
+      console.log(`\n  genepress_activity_log read-back: ERROR — ${logErr.message}`);
+    } else if (!logRows || logRows.length === 0) {
+      console.log("\n  genepress_activity_log: no compile_succeeded entry found for this component");
+    } else {
+      const logRow = logRows[0];
+      const afterState = logRow.after_state as Record<string, unknown> | null;
+      const ssv = afterState?.["spec_schema_version"];
+      console.log("\n  activity log compile_succeeded entry:");
+      console.log(JSON.stringify(logRow, null, 4).split("\n").map(l => "  " + l).join("\n"));
+      console.log(`\n  spec_schema_version in after_state = "${ssv}" — ${ssv === "source_spec_schema_v1" ? "✓ correct" : "✗ WRONG or missing"}`);
+    }
   } else {
-    console.log("  genepress_compiled_variants row read back successfully:");
-    console.log(JSON.stringify(variantRow, null, 4).split("\n").map(l => "  " + l).join("\n"));
-    const statusOk = variantRow.compile_status === "success";
-    console.log(`\n  compile_status = "${variantRow.compile_status}" — ${statusOk ? "✓ correct" : "✗ WRONG"}`);
-  }
+    // Mock path: inspect captured in-memory writes
+    console.log(`  DB unreachable — inspecting ${dbWrites.length} mock writes captured in memory:\n`);
+    dbWrites.forEach((w, i) => {
+      console.log(`  Write [${i + 1}]: table="${w.table}", operation="${w.operation}"`);
+    });
 
-  // Re-query activity log for the most recent compile_succeeded entry for this component
-  const { data: logRows, error: logErr } = await supabase
-    .from("genepress_activity_log")
-    .select("action_type, after_state, created_at")
-    .eq("component_id", sourceSpec.component_id)
-    .eq("action_type", "compile_succeeded")
-    .order("created_at", { ascending: false })
-    .limit(1);
+    const variantWrite = dbWrites.find(w => w.table === "genepress_compiled_variants" && w.operation === "upsert");
+    const activityWrite = dbWrites.find(w => w.table === "genepress_activity_log" && w.operation === "insert");
 
-  if (logErr) {
-    console.log(`\n  genepress_activity_log read-back: ERROR — ${logErr.message}`);
-  } else if (!logRows || logRows.length === 0) {
-    console.log("\n  genepress_activity_log: no compile_succeeded entry found for this component");
-  } else {
-    const logRow = logRows[0];
-    const afterState = logRow.after_state as Record<string, unknown> | null;
+    const variantData = variantWrite?.data as Record<string, unknown> | undefined;
+    const compileStatus = variantData?.["compile_status"];
+    console.log(`\n  compile_status in upsert payload = "${compileStatus}" — ${compileStatus === "success" ? "✓ correct" : "✗ WRONG or missing"}`);
+    console.log("  (Live DB write not confirmed — sandbox blocks outbound HTTPS — FINDING-02)");
+
+    const activityData = activityWrite?.data as Record<string, unknown> | undefined;
+    const afterState = activityData?.["after_state"] as Record<string, unknown> | undefined;
     const ssv = afterState?.["spec_schema_version"];
-    console.log("\n  activity log compile_succeeded entry:");
-    console.log(JSON.stringify(logRow, null, 4).split("\n").map(l => "  " + l).join("\n"));
-    console.log(`\n  spec_schema_version in after_state = "${ssv}" — ${ssv === "source_spec_schema_v1" ? "✓ correct" : "✗ WRONG or missing"}`);
+    console.log(`\n  spec_schema_version in activity log after_state = "${ssv}" — ${ssv === "source_spec_schema_v1" ? "✓ correct" : "✗ WRONG or missing"}`);
+    console.log("  (Live DB write not confirmed — sandbox blocks outbound HTTPS — FINDING-02)");
   }
   console.log();
 
@@ -446,12 +502,14 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════════════");
   console.log("  SUMMARY");
   console.log("═══════════════════════════════════════════════════════════════");
-  console.log(`  Spec source     : ${specSource}`);
-  console.log(`  Key type        : ${keyType}`);
-  console.log(`  compile()       : ${compiled.compile_status === "success" ? "✓ success" : "✗ failed"}`);
-  console.log(`  compile_warnings: ${compiled.compile_warnings.length === 0 ? "none" : compiled.compile_warnings.join(", ")}`);
+  console.log(`  Spec source      : ${specSource}`);
+  console.log(`  Key type         : ${keyType}`);
+  console.log(`  DB reachable     : ${dbReachable ? "yes" : "NO — FINDING-02: outbound HTTPS blocked in sandbox"}`);
+  console.log(`  compile()        : ${compiled.compile_status === "success" ? "✓ success" : "✗ failed"}`);
+  console.log(`  compile_warnings : ${compiled.compile_warnings.length === 0 ? "none" : compiled.compile_warnings.join(", ")}`);
   console.log(`  ExportSafetyFlags: ${failingFlags.length === 0 ? "ALL CLEAR (7/7 false)" : `${failingFlags.length} FLAG(S) RAISED`}`);
-  console.log(`  Golden structure: ${discrepancies.length === 0 ? "MATCHES" : `${discrepancies.length} DISCREPANCY/DISCREPANCIES`}`);
+  console.log(`  Golden structure : ${discrepancies.length === 0 ? "MATCHES" : `${discrepancies.length} DISCREPANCY/DISCREPANCIES`}`);
+  console.log(`  DB write confirm : ${dbReachable ? "live read-back" : "mock capture only (FINDING-02)"}`);
   console.log();
 
   const gatePass =
