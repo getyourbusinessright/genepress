@@ -12,6 +12,8 @@ export type SlotDefinition = {
   max_items: number | null;
   item_schema: object | null;
   notes: string;
+  /** The region_id of the ClassifiedRegion this slot was extracted from. */
+  region_id: string;
 };
 
 export type SlotExtractionResult = {
@@ -40,6 +42,7 @@ function makeTextHeadlineDef(
     max_items: null,
     item_schema: null,
     notes: `Classified from region "${region.element_name ?? region.region_id}" with confidence ${region.confidence}.`,
+    region_id: region.region_id,
   };
 }
 
@@ -56,6 +59,7 @@ function makeTextBodyDef(
     max_items: null,
     item_schema: null,
     notes: `Classified from region "${region.element_name ?? region.region_id}" with confidence ${region.confidence}.`,
+    region_id: region.region_id,
   };
 }
 
@@ -72,6 +76,7 @@ function makeCtaDef(
     max_items: null,
     item_schema: null,
     notes: `Classified from region "${region.element_name ?? region.region_id}" with confidence ${region.confidence}.`,
+    region_id: region.region_id,
   };
 }
 
@@ -88,6 +93,7 @@ function makeImageDef(
     max_items: null,
     item_schema: null,
     notes: `Classified from region "${region.element_name ?? region.region_id}" with confidence ${region.confidence}.`,
+    region_id: region.region_id,
   };
 }
 
@@ -104,6 +110,7 @@ function makeListDef(
     max_items: 6,
     item_schema: { text: "string", icon: "string | null" },
     notes: `Classified from region "${region.element_name ?? region.region_id}" with confidence ${region.confidence}.`,
+    region_id: region.region_id,
   };
 }
 
