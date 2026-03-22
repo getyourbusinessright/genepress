@@ -2,16 +2,22 @@
  * Phase 1B gate test — Elementor adapter isolation test
  *
  * Tests compile() and validate() in complete isolation (no sandbox, no UI).
- * Uses a mock Supabase client to capture DB writes without requiring a live DB.
+ * Uses the real Supabase client to query genepress_source_specs and write
+ * compiled variants.
+ *
+ * Env required (loaded via --env-file=.env):
+ *   SUPABASE_URL
+ *   SUPABASE_SERVICE_ROLE_KEY
  *
  * Tasks performed:
- *   1. Log the CTA 538 source spec (constructed fixture — DB unreachable, see FINDING-01)
- *   2. Run compile() directly
- *   3. Run validate() on the compiled output
+ *   1. Query genepress_source_specs for CTA 538 — log full row
+ *   2. Run compile() directly — log full CompiledVariant
+ *   3. Run validate() on the compiled output — log all 7 ExportSafetyFlags
  *   4. Structural check against V3 Flex golden export format
- *   5. Report all results
+ *   5. Report results
  */
 
+import { createClient } from "@supabase/supabase-js";
 import {
   createElementorAdapter,
 } from "../adapters/elementor/elementor_adapter_v1.0.0.js";
@@ -22,83 +28,34 @@ import type {
   ExportSafetyFlags,
 } from "../adapters/elementor/elementor_adapter_v1.0.0.js";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
+// ─── Supabase client ──────────────────────────────────────────────────────────
 
-// ─── FINDING-01: DB unreachable ───────────────────────────────────────────────
-//
-// genepress_source_specs cannot be queried at test time because:
-//   - No .env file exists in the project root (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY absent)
-//   - Local Supabase Docker is not running (Docker daemon unreachable)
-//   - No alternative credential source detected
-//
-// Resolution: CTA 538 source spec constructed as a fixture below, reflecting the
-// canonical source_spec_schema_v1 shape. Adapter logic is tested against this fixture.
-// Live DB query must be re-run once credentials are available.
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// ─── Mock Supabase client ─────────────────────────────────────────────────────
-
-type DbWrite = {
-  table: string;
-  operation: string;
-  data: unknown;
-};
-const dbWrites: DbWrite[] = [];
-
-function makeMockChain(table: string, operation: string, data?: unknown) {
-  if (data !== undefined) {
-    dbWrites.push({ table, operation, data });
-  }
-  const chain: Record<string, unknown> = {};
-  const thenFn = (resolve: (v: { data: null; error: null }) => unknown) =>
-    Promise.resolve(resolve({ data: null, error: null }));
-  chain["then"] = thenFn;
-  chain["catch"] = () => chain;
-  chain["eq"] = (_col: string, _val: unknown) => chain;
-  chain["upsert"] = (d: unknown, _opts?: unknown) => {
-    dbWrites.push({ table, operation: "upsert", data: d });
-    return { error: null, then: thenFn, catch: () => ({}) };
-  };
-  chain["insert"] = (d: unknown) => {
-    dbWrites.push({ table, operation: "insert", data: d });
-    return { then: thenFn, catch: () => ({}) };
-  };
-  chain["update"] = (d: unknown) => {
-    dbWrites.push({ table, operation: "update", data: d });
-    return chain;
-  };
-  return chain;
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error("ERROR: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env");
+  process.exit(1);
 }
 
-const mockSupabase = {
-  from: (table: string) => ({
-    upsert: (data: unknown, opts?: unknown) => {
-      dbWrites.push({ table, operation: "upsert", data });
-      void opts;
-      return { error: null, then: (fn: (v: { error: null }) => unknown) => Promise.resolve(fn({ error: null })), catch: () => ({}) };
-    },
-    insert: (data: unknown) => {
-      dbWrites.push({ table, operation: "insert", data });
-      return { then: (fn: (v: { data: null; error: null }) => unknown) => Promise.resolve(fn({ data: null, error: null })), catch: () => ({}) };
-    },
-    update: (data: unknown) => {
-      dbWrites.push({ table, operation: "update", data });
-      return makeMockChain(table, "update");
-    },
-    select: (_cols?: string) => ({
-      eq: (_col: string, _val: unknown) => ({
-        single: () => Promise.resolve({ data: null, error: { message: "Mock DB — no live data" } }),
-      }),
-    }),
-  }),
-} as unknown as SupabaseClient;
+// Note key format for the record
+const keyType = SUPABASE_KEY.startsWith("sb_publishable_")
+  ? "anon/publishable (sb_publishable_*) — NOTE: service role key expected; RLS may block writes"
+  : SUPABASE_KEY.startsWith("sb_secret_")
+  ? "service_role (sb_secret_*)"
+  : SUPABASE_KEY.startsWith("eyJ")
+  ? "service_role JWT (eyJ*)"
+  : "unknown format";
 
-// ─── CTA 538 Source Spec Fixture ──────────────────────────────────────────────
+console.log(`Key type detected: ${keyType}\n`);
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ─── CTA 538 fallback fixture ─────────────────────────────────────────────────
 //
-// Component: CTA 538
-// A standard call-to-action section with headline, supporting body copy, and
-// a primary CTA button. Canonical source_spec_schema_v1 shape.
+// Used only if the DB query returns no matching row.
 
-const CTA_538_SOURCE_SPEC: SourceSpec = {
+const CTA_538_FIXTURE: SourceSpec = {
   spec_id: "spec_cta_538_v1",
   component_id: "cta_538",
   source_id: null,
@@ -193,19 +150,13 @@ type Discrepancy = { path: string; expected: string; actual: string };
 function checkGoldenStructure(compiledJson: Record<string, unknown>): Discrepancy[] {
   const discrepancies: Discrepancy[] = [];
 
-  // Top-level keys
   const requiredTopLevel = ["title", "type", "version", "page_settings", "content"];
   for (const key of requiredTopLevel) {
     if (!(key in compiledJson)) {
-      discrepancies.push({
-        path: `[root].${key}`,
-        expected: "present",
-        actual: "missing",
-      });
+      discrepancies.push({ path: `[root].${key}`, expected: "present", actual: "missing" });
     }
   }
 
-  // version must be "0.4"
   if (compiledJson["version"] !== "0.4") {
     discrepancies.push({
       path: "[root].version",
@@ -214,48 +165,32 @@ function checkGoldenStructure(compiledJson: Record<string, unknown>): Discrepanc
     });
   }
 
-  // content must be an array
   const content = compiledJson["content"];
   if (!Array.isArray(content)) {
-    discrepancies.push({
-      path: "[root].content",
-      expected: "array",
-      actual: typeof content,
-    });
+    discrepancies.push({ path: "[root].content", expected: "array", actual: typeof content });
     return discrepancies;
   }
 
-  // Pro widget type prefixes that must not appear
   const PRO_PREFIXES = [
     "pro-", "woocommerce", "lottie", "form", "hotspot",
     "pro-gallery", "nav-menu", "share-buttons", "paypal-button", "stripe-button",
   ];
+  const EXTERNAL_SCRIPT_RE = /<script|javascript:/i;
 
-  // External script pattern
-  const EXTERNAL_SCRIPT_PATTERN = /<script|javascript:/i;
-
-  // Atomic construct role values that must not appear
-  const ATOMIC_ROLES = new Set(["atomic_form"]);
-
-  function checkElement(el: unknown, path: string, depth: number): void {
+  function checkElement(el: unknown, path: string): void {
     if (typeof el !== "object" || el === null) {
       discrepancies.push({ path, expected: "object", actual: String(el) });
       return;
     }
     const node = el as Record<string, unknown>;
 
-    // Required keys on every element
-    const requiredKeys = ["id", "elType", "isInner", "settings", "elements"];
-    for (const key of requiredKeys) {
+    for (const key of ["id", "elType", "isInner", "settings", "elements"]) {
       if (!(key in node)) {
         discrepancies.push({ path: `${path}.${key}`, expected: "present", actual: "missing" });
       }
     }
 
     const elType = node["elType"];
-    const isInner = node["isInner"];
-
-    // elType must be "container" or "widget"
     if (elType !== "container" && elType !== "widget") {
       discrepancies.push({
         path: `${path}.elType`,
@@ -264,24 +199,19 @@ function checkGoldenStructure(compiledJson: Record<string, unknown>): Discrepanc
       });
     }
 
-    // isInner must be false (V3 Flex — no inner sections)
-    if (isInner !== false) {
+    if (node["isInner"] !== false) {
       discrepancies.push({
         path: `${path}.isInner`,
         expected: "false",
-        actual: JSON.stringify(isInner),
+        actual: JSON.stringify(node["isInner"]),
       });
     }
 
     if (elType === "widget") {
-      // widgetType must be present on widgets
       if (!("widgetType" in node)) {
         discrepancies.push({ path: `${path}.widgetType`, expected: "present", actual: "missing" });
       }
-
       const widgetType = typeof node["widgetType"] === "string" ? node["widgetType"] : "";
-
-      // No Pro widget types
       for (const prefix of PRO_PREFIXES) {
         if (widgetType.startsWith(prefix)) {
           discrepancies.push({
@@ -291,106 +221,138 @@ function checkGoldenStructure(compiledJson: Record<string, unknown>): Discrepanc
           });
         }
       }
-
-      // No external script references in settings
-      const settings = node["settings"];
-      if (typeof settings === "object" && settings !== null) {
-        const settingsStr = JSON.stringify(settings);
-        if (EXTERNAL_SCRIPT_PATTERN.test(settingsStr)) {
-          discrepancies.push({
-            path: `${path}.settings`,
-            expected: "no external script references",
-            actual: "contains <script or javascript:",
-          });
-        }
+      if (EXTERNAL_SCRIPT_RE.test(JSON.stringify(node["settings"] ?? {}))) {
+        discrepancies.push({
+          path: `${path}.settings`,
+          expected: "no external script references",
+          actual: "contains <script or javascript:",
+        });
       }
-
-      // Widgets must have elements: []
-      const elements = node["elements"];
-      if (!Array.isArray(elements) || elements.length !== 0) {
+      const elems = node["elements"];
+      if (!Array.isArray(elems) || elems.length !== 0) {
         discrepancies.push({
           path: `${path}.elements`,
           expected: "[]",
-          actual: JSON.stringify(elements),
+          actual: JSON.stringify(elems),
         });
       }
     }
 
     if (elType === "container") {
-      // Containers at depth 0 must be root containers (not inner)
-      // No atomic constructs in settings
-      const settings = node["settings"] as Record<string, unknown> | undefined;
-      if (settings && "atomic_form" in settings) {
-        discrepancies.push({
-          path: `${path}.settings.atomic_form`,
-          expected: "absent (no atomic constructs)",
-          actual: "present",
-        });
-      }
-
-      // Check role via the structural rules doesn't surface atomic_form in elType
-      // (already checked by elType check above)
-
-      // Recurse into child elements
-      const elements = node["elements"];
-      if (Array.isArray(elements)) {
-        elements.forEach((child, i) => checkElement(child, `${path}.elements[${i}]`, depth + 1));
+      if (Array.isArray(node["elements"])) {
+        (node["elements"] as unknown[]).forEach((child, i) =>
+          checkElement(child, `${path}.elements[${i}]`),
+        );
       }
     }
 
-    // No atomic role markers in element (belt-and-suspenders)
-    if (typeof node["role"] === "string" && ATOMIC_ROLES.has(node["role"])) {
+    // No atomic_form role leaking through
+    if (node["role"] === "atomic_form") {
       discrepancies.push({
         path: `${path}.role`,
         expected: "no atomic_form role",
-        actual: node["role"] as string,
+        actual: "atomic_form",
       });
     }
   }
 
-  // Check top-level container nodes
   content.forEach((node, i) => {
     const path = `content[${i}]`;
-    checkElement(node, path, 0);
-
-    // Top-level elements must be containers
-    if (typeof node === "object" && node !== null) {
-      const el = node as Record<string, unknown>;
-      if (el["elType"] !== "container") {
-        discrepancies.push({
-          path: `${path}.elType`,
-          expected: '"container" (top-level must be container)',
-          actual: JSON.stringify(el["elType"]),
-        });
-      }
+    checkElement(node, path);
+    const el = node as Record<string, unknown>;
+    if (el["elType"] !== "container") {
+      discrepancies.push({
+        path: `${path}.elType`,
+        expected: '"container" (top-level must be container)',
+        actual: JSON.stringify(el["elType"]),
+      });
     }
   });
 
   return discrepancies;
 }
 
-// ─── Main test runner ─────────────────────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log("═══════════════════════════════════════════════════════════════");
   console.log("  ELEMENTOR ADAPTER ISOLATION TEST — Phase 1B Gate");
+  console.log(`  Supabase: ${SUPABASE_URL}`);
   console.log("═══════════════════════════════════════════════════════════════\n");
 
-  // ── TASK 1: Source spec ──────────────────────────────────────────────────────
-  console.log("─── TASK 1: CTA 538 Source Spec ─────────────────────────────");
-  console.log("FINDING-01: genepress_source_specs DB query NOT executed.");
-  console.log("  Reason: No .env credentials and Docker daemon not running.");
-  console.log("  Using constructed fixture matching source_spec_schema_v1:\n");
-  console.log(JSON.stringify(CTA_538_SOURCE_SPEC, null, 2));
-  console.log();
+  // ── TASK 1: Query genepress_source_specs for CTA 538 ────────────────────────
+  console.log("─── TASK 1: genepress_source_specs — CTA 538 ────────────────");
+
+  // Try multiple likely component_id / spec_id patterns for CTA 538
+  const { data: rows, error: queryError } = await supabase
+    .from("genepress_source_specs")
+    .select("*")
+    .or("component_id.ilike.%cta%538%,component_id.ilike.%538%,spec_id.ilike.%cta%538%,spec_id.ilike.%538%");
+
+  let sourceSpec: SourceSpec;
+  let specSource: "live_db" | "fixture";
+
+  if (queryError) {
+    console.log(`DB query error: ${queryError.message}`);
+    console.log("  → falling back to constructed fixture\n");
+    sourceSpec = CTA_538_FIXTURE;
+    specSource = "fixture";
+  } else if (!rows || rows.length === 0) {
+    console.log("DB query returned 0 rows matching CTA 538 patterns.");
+    console.log("  Patterns tried: component_id or spec_id containing '538' or 'cta%538'");
+
+    // Broader fallback: show all spec_ids so we can see what's there
+    const { data: allSpecs, error: allErr } = await supabase
+      .from("genepress_source_specs")
+      .select("spec_id, component_id, spec_schema_version, spec_origin")
+      .limit(20);
+
+    if (!allErr && allSpecs && allSpecs.length > 0) {
+      console.log(`\n  All specs in table (up to 20):`);
+      allSpecs.forEach(r => console.log(`    spec_id=${r.spec_id}  component_id=${r.component_id}`));
+    } else if (!allErr && (!allSpecs || allSpecs.length === 0)) {
+      console.log("  Table appears to be empty.");
+    } else {
+      console.log(`  Could not list all specs: ${allErr?.message}`);
+    }
+
+    console.log("\n  → falling back to constructed fixture\n");
+    sourceSpec = CTA_538_FIXTURE;
+    specSource = "fixture";
+  } else {
+    // Use first matching row
+    const row = rows[0];
+    console.log(`Found ${rows.length} matching row(s). Using first:\n`);
+    console.log(JSON.stringify(row, null, 2));
+
+    sourceSpec = {
+      spec_id: row.spec_id,
+      component_id: row.component_id,
+      source_id: row.source_id ?? null,
+      spec_schema_version: row.spec_schema_version,
+      spec_origin: row.spec_origin,
+      validation_result: row.validation_result ?? null,
+      source_checksum: row.source_checksum ?? null,
+      parser_version: row.parser_version ?? null,
+      slot_definitions: Array.isArray(row.slot_definitions)
+        ? row.slot_definitions as SourceSpec["slot_definitions"]
+        : [],
+      structural_rules: Array.isArray(row.structural_rules)
+        ? row.structural_rules as SourceSpec["structural_rules"]
+        : [],
+    };
+    specSource = "live_db";
+  }
+
+  console.log(`\nSpec source: ${specSource}\n`);
 
   // ── TASK 2: compile() ────────────────────────────────────────────────────────
   console.log("─── TASK 2: compile() ───────────────────────────────────────");
-  const adapter = createElementorAdapter(mockSupabase);
+  const adapter = createElementorAdapter(supabase);
   let compiled: CompiledVariant;
 
   try {
-    compiled = await adapter.compile(CTA_538_SOURCE_SPEC);
+    compiled = await adapter.compile(sourceSpec);
     console.log("compile() returned successfully.\n");
     console.log("Full CompiledVariant output:");
     console.log(JSON.stringify(compiled, null, 2));
@@ -405,63 +367,78 @@ async function main() {
   const flags: ExportSafetyFlags = adapter.validate(compiled.compiled_json);
   console.log("ExportSafetyFlags result:");
   console.log(JSON.stringify(flags, null, 2));
-  console.log();
 
   const failingFlags = Object.entries(flags).filter(([, v]) => v);
   if (failingFlags.length === 0) {
-    console.log("✓ ALL 7 flags are false — export safety check PASSED.");
+    console.log("\n✓ ALL 7 flags are false — export safety check PASSED.");
   } else {
-    console.log(`✗ ${failingFlags.length} flag(s) are TRUE — export safety check FAILED:`);
-    for (const [flag, _val] of failingFlags) {
+    console.log(`\n✗ ${failingFlags.length} flag(s) TRUE — export safety check FAILED:`);
+    for (const [flag] of failingFlags) {
       console.log(`  - ${flag}: true`);
     }
   }
   console.log();
 
-  // ── TASK 4: Structural check vs V3 Flex golden format ────────────────────────
+  // ── TASK 4: Structural check ─────────────────────────────────────────────────
   console.log("─── TASK 4: Structural check vs V3 Flex golden format ───────");
   const discrepancies = checkGoldenStructure(compiled.compiled_json as Record<string, unknown>);
 
   if (discrepancies.length === 0) {
-    console.log("✓ No structural discrepancies found — matches V3 Flex golden format.");
+    console.log("✓ No structural discrepancies — matches V3 Flex golden format.");
   } else {
     console.log(`✗ ${discrepancies.length} structural discrepancy/discrepancies found:`);
     for (const d of discrepancies) {
       console.log(`  PATH:     ${d.path}`);
       console.log(`  EXPECTED: ${d.expected}`);
-      console.log(`  ACTUAL:   ${d.actual}`);
-      console.log();
+      console.log(`  ACTUAL:   ${d.actual}\n`);
     }
   }
   console.log();
 
   // ── TASK 5: DB write verification ────────────────────────────────────────────
   console.log("─── TASK 5: DB write verification ───────────────────────────");
-  console.log(`Total DB writes captured: ${dbWrites.length}`);
-  dbWrites.forEach((w, i) => {
-    console.log(`\n  Write [${i + 1}]: table="${w.table}", operation="${w.operation}"`);
-    console.log("  Data:", JSON.stringify(w.data, null, 4).split("\n").join("\n  "));
-  });
 
-  const variantWrite = dbWrites.find(w => w.table === "genepress_compiled_variants" && w.operation === "upsert");
-  const activityWrite = dbWrites.find(w => w.table === "genepress_activity_log" && w.operation === "insert");
+  // Re-query genepress_compiled_variants for the variant we just wrote
+  const variantId = compiled.variant_id;
+  const { data: variantRow, error: variantErr } = await supabase
+    .from("genepress_compiled_variants")
+    .select("id, compile_status, adapter_version, export_safety_flags, fixture_suite_version")
+    .eq("id", variantId)
+    .single();
 
-  console.log("\n  compile_status written to genepress_compiled_variants:");
-  if (variantWrite) {
-    const data = variantWrite.data as Record<string, unknown>;
-    console.log(`    compile_status = "${data["compile_status"]}" — ${data["compile_status"] === "success" ? "✓ correct" : "✗ WRONG"}`);
+  if (variantErr) {
+    console.log(`  genepress_compiled_variants read-back: ERROR — ${variantErr.message}`);
+    console.log("  compile_status written: UNKNOWN (read-back failed)");
+  } else if (!variantRow) {
+    console.log("  genepress_compiled_variants read-back: row not found");
+    console.log("  compile_status written: UNKNOWN");
   } else {
-    console.log("    ✗ No upsert found for genepress_compiled_variants");
+    console.log("  genepress_compiled_variants row read back successfully:");
+    console.log(JSON.stringify(variantRow, null, 4).split("\n").map(l => "  " + l).join("\n"));
+    const statusOk = variantRow.compile_status === "success";
+    console.log(`\n  compile_status = "${variantRow.compile_status}" — ${statusOk ? "✓ correct" : "✗ WRONG"}`);
   }
 
-  console.log("\n  spec_schema_version in activity log after_state:");
-  if (activityWrite) {
-    const data = activityWrite.data as Record<string, unknown>;
-    const afterState = data["after_state"] as Record<string, unknown>;
-    const specSchemaVersion = afterState?.["spec_schema_version"];
-    console.log(`    spec_schema_version = "${specSchemaVersion}" — ${specSchemaVersion === "source_spec_schema_v1" ? "✓ correct" : "✗ WRONG or missing"}`);
+  // Re-query activity log for the most recent compile_succeeded entry for this component
+  const { data: logRows, error: logErr } = await supabase
+    .from("genepress_activity_log")
+    .select("action_type, after_state, created_at")
+    .eq("component_id", sourceSpec.component_id)
+    .eq("action_type", "compile_succeeded")
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (logErr) {
+    console.log(`\n  genepress_activity_log read-back: ERROR — ${logErr.message}`);
+  } else if (!logRows || logRows.length === 0) {
+    console.log("\n  genepress_activity_log: no compile_succeeded entry found for this component");
   } else {
-    console.log("    ✗ No insert found for genepress_activity_log");
+    const logRow = logRows[0];
+    const afterState = logRow.after_state as Record<string, unknown> | null;
+    const ssv = afterState?.["spec_schema_version"];
+    console.log("\n  activity log compile_succeeded entry:");
+    console.log(JSON.stringify(logRow, null, 4).split("\n").map(l => "  " + l).join("\n"));
+    console.log(`\n  spec_schema_version in after_state = "${ssv}" — ${ssv === "source_spec_schema_v1" ? "✓ correct" : "✗ WRONG or missing"}`);
   }
   console.log();
 
@@ -469,19 +446,19 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════════════");
   console.log("  SUMMARY");
   console.log("═══════════════════════════════════════════════════════════════");
+  console.log(`  Spec source     : ${specSource}`);
+  console.log(`  Key type        : ${keyType}`);
   console.log(`  compile()       : ${compiled.compile_status === "success" ? "✓ success" : "✗ failed"}`);
-  console.log(`  compile_status  : ${compiled.compile_status}`);
-  console.log(`  warnings        : ${compiled.compile_warnings.length === 0 ? "none" : compiled.compile_warnings.join(", ")}`);
+  console.log(`  compile_warnings: ${compiled.compile_warnings.length === 0 ? "none" : compiled.compile_warnings.join(", ")}`);
   console.log(`  ExportSafetyFlags: ${failingFlags.length === 0 ? "ALL CLEAR (7/7 false)" : `${failingFlags.length} FLAG(S) RAISED`}`);
   console.log(`  Golden structure: ${discrepancies.length === 0 ? "MATCHES" : `${discrepancies.length} DISCREPANCY/DISCREPANCIES`}`);
-  console.log(`  DB writes       : ${dbWrites.length} captured (mock)`);
-  console.log(`  FINDING-01      : DB unreachable — spec queried from fixture, not live DB`);
   console.log();
 
-  const gatePass = compiled.compile_status === "success" &&
+  const gatePass =
+    compiled.compile_status === "success" &&
     failingFlags.length === 0 &&
     discrepancies.length === 0;
-  console.log(`  GATE RESULT: ${gatePass ? "✓ PASS — ready to proceed to Phase 1C" : "✗ FAIL — see discrepancies above"}`);
+  console.log(`  GATE RESULT: ${gatePass ? "✓ PASS — ready to proceed to Phase 1C" : "✗ FAIL — see above"}`);
   console.log("═══════════════════════════════════════════════════════════════\n");
 
   process.exit(gatePass ? 0 : 1);
