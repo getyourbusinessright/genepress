@@ -225,7 +225,7 @@ Deno.serve(async (req: Request) => {
   }
 
   // --- Log to genepress_activity_log ---
-  const { error: logError } = await supabase
+  const { data: intakeLogData, error: logError } = await supabase
     .from("genepress_activity_log")
     .insert({
       action_type: "intake_created",
@@ -238,11 +238,14 @@ Deno.serve(async (req: Request) => {
         component_name,
         rights_status,
       },
-    });
+    })
+    .select();
 
   if (logError) {
     // Log the error but don't fail the request — logging must not block the pipeline
     console.error("Activity log write failed [intake_created]:", JSON.stringify(logError));
+  } else {
+    console.log("Activity log [intake_created] inserted:", JSON.stringify(intakeLogData));
   }
 
   // --- Sanitization ---
@@ -265,21 +268,26 @@ Deno.serve(async (req: Request) => {
     .eq("component_id", component_id);
 
   // Log sanitization result
-  const { error: sanitizationLogError } = await supabase.from("genepress_activity_log").insert({
-    action_type: "sanitization_complete",
-    component_id,
-    actor: "system",
-    before_state: { status: "intake_received" },
-    after_state: {
-      status: newStatus,
-      sanitization_result: sanitization.result,
-      failures: sanitization.failures,
-      warnings: sanitization.warnings,
-    },
-  });
+  const { data: sanitizationLogData, error: sanitizationLogError } = await supabase
+    .from("genepress_activity_log")
+    .insert({
+      action_type: "sanitization_complete",
+      component_id,
+      actor: "system",
+      before_state: { status: "intake_received" },
+      after_state: {
+        status: newStatus,
+        sanitization_result: sanitization.result,
+        failures: sanitization.failures,
+        warnings: sanitization.warnings,
+      },
+    })
+    .select();
 
   if (sanitizationLogError) {
     console.error("Activity log write failed [sanitization_complete]:", JSON.stringify(sanitizationLogError));
+  } else {
+    console.log("Activity log [sanitization_complete] inserted:", JSON.stringify(sanitizationLogData));
   }
 
   // Hard stop on sanitization failure
