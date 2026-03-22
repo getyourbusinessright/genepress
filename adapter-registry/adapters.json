@@ -1,0 +1,12 @@
+{
+  "adapters": [
+    {
+      "builder": "elementor",
+      "adapterVersion": "elementor_adapter_v1.0.0",
+      "file": "/adapters/elementor/elementor_adapter_v1.0.0.ts",
+      "status": "active",
+      "supportedEditorModes": ["flex"],
+      "supportedSpecVersions": ["source_spec_schema_v1"]
+    }
+  ]
+}

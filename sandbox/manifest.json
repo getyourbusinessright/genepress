@@ -1,0 +1,13 @@
+{
+  "manifest_version": "1.0.0",
+  "fixture_suite_version": "fixture_suite_v1.0.0",
+  "sandbox": {
+    "elementor_free": {
+      "version": "3.27.5",
+      "plugin_slug": "elementor",
+      "editor_mode": "flex",
+      "container_type": "flexbox",
+      "notes": "Pinned to Elementor Free 3.27.5 — Flex Container (Flexbox) mode enabled."
+    }
+  }
+}
