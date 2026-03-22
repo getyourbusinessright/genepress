@@ -257,7 +257,7 @@ Deno.serve(async (req: Request) => {
   // Update genepress_components status
   const newStatus = sanitization.result === "fail"
     ? "sanitization_failed"
-    : "spec_generated";
+    : "sanitization_passed";
 
   await supabase
     .from("genepress_components")
