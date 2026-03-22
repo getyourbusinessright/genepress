@@ -64,8 +64,9 @@ export type GenerateSpecResult = {
  *   1. Elementor icon-list widget: settings.icon_list is an array with ≥ 2 entries.
  *      This is the canonical repeating-item container in Elementor.
  *   2. Generic elements/children array whose direct children all share the same
- *      widgetType / elType / Figma type (uniform shape), with ≥ 2 children.
- *      A single child never constitutes a repeating group.
+ *      widgetType / elType / Figma type (uniform shape), with ≥ 3 children.
+ *      Two same-type children is too ambiguous — a two-column layout container
+ *      has two children of the same elType and is not a repeating group.
  *
  * Semantic type is intentionally NOT used here — a region classified as "list"
  * may still be singleton if the source only contains one configured item.
@@ -88,7 +89,7 @@ function isRepeatingContainer(region: ClassifiedRegion): boolean {
 
   if (childArrayKey) {
     const kids = raw[childArrayKey] as Record<string, unknown>[];
-    if (kids.length < 2) return false;
+    if (kids.length < 3) return false;
 
     // Determine the shape key to compare across children
     const typeOf = (c: Record<string, unknown>): string | null =>
