@@ -6,6 +6,7 @@ import type { SanitizedPayload } from "./parse.ts";
 import { classifyHeuristic } from "./classify-heuristic.ts";
 import { classifyWithAI, reportToSentry } from "./classify-ai.ts";
 import { extractSlots } from "./slot-extractor.ts";
+import { generateAndPersistSpec, PARSER_VERSION } from "./spec-generator.ts";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -409,6 +410,32 @@ Deno.serve(async (req: Request) => {
         );
       }
 
+      // ── GP-1A-05: Generate + persist the source spec ──────────────────────
+      let specResult: { spec_id: string; validation_result: "passed" | "failed"; validation_errors?: string[] } | null = null;
+      try {
+        specResult = await generateAndPersistSpec(
+          supabase,
+          parseResult,
+          slotResult.slot_definitions,
+          {
+            component_id,
+            source_id: insertedSource.source_id,
+            source_checksum,
+            parser_version: PARSER_VERSION,
+            sanitization_status: "passed",
+          },
+        );
+      } catch (specErr) {
+        const specErrMsg = specErr instanceof Error ? specErr.message : String(specErr);
+        console.error("[GP-1A-05] spec generation failed for", component_id, "—", specErrMsg);
+        await reportToSentry({
+          component_id,
+          checkpoint: "gp1a05_spec_generation",
+          error_class: specErr instanceof Error ? specErr.constructor.name : "UnknownError",
+          error_detail: specErrMsg,
+        });
+      }
+
       return jsonResponse(
         {
           success: true,
@@ -419,7 +446,10 @@ Deno.serve(async (req: Request) => {
           sanitization_warnings: sanitization.warnings,
           classification_status: "classification_complete",
           slot_count: slotResult.slot_definitions.length,
-          message: "Component intake, sanitization, and classification complete.",
+          spec_id: specResult?.spec_id ?? null,
+          spec_validation_result: specResult?.validation_result ?? null,
+          spec_validation_errors: specResult?.validation_errors ?? null,
+          message: "Component intake, sanitization, classification, and spec generation complete.",
         },
         200,
       );
